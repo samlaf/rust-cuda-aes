@@ -1,0 +1,14 @@
+[package]
+name = "aes-gpu"
+version = "0.1.0"
+edition = "2024"
+
+# The GPU AES backend (library): compiles the `kernels` crate to PTX (build.rs),
+# embeds it, and exposes `AesGpu` for uploading inputs and launching the kernel.
+# The CPU counterpart is `aes-cpu`.
+[dependencies]
+cust = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d717038a92c90bf4a482b0b8dd3259344" }
+aes-core = { path = "../aes-core" }
+
+[build-dependencies]
+cuda_builder = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d717038a92c90bf4a482b0b8dd3259344", features = ["rustc_codegen_nvvm"] }

@@ -6,8 +6,13 @@ edition = "2024"
 [dependencies]
 cuda_std = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d717038a92c90bf4a482b0b8dd3259344" }
 glam = { version = "0.33", default-features = false, features = ["u32"] }
+aes-core = { path = "../crates/aes-core" }
 
 [lib]
 # - cdylib: because the nvptx targets do not support binary crate types.
-# - rlib: so the `kernels` crate can be used as a dependency by `rust-cuda-basic`.
+# - rlib: so the `kernels` crate can be used as a dependency by the host.
 crate-type = ["cdylib", "rlib"]
+
+# Keep this crate its own workspace root: `CudaBuilder` compiles it standalone
+# for the nvptx64 target, isolated from the host workspace's resolver/lockfile.
+[workspace]

@@ -1,0 +1,12 @@
+[package]
+name = "aes-core"
+version = "0.1.0"
+edition = "2024"
+
+# Portable, no_std AES-128 primitives shared by every backend:
+#   - the GPU `kernels` crate (compiled to PTX for nvptx64),
+#   - the CPU implementations in `aes-cpu`,
+#   - the host driver.
+# Keep this crate dependency-free and device-compatible (no std in non-test code)
+# so it can be pulled into the PTX build.
+[dependencies]

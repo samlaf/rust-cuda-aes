@@ -1,0 +1,35 @@
+[package]
+name = "aes-bench"
+version = "0.1.0"
+edition = "2024"
+# Bench files live directly in this dir (benches/cpu.rs, ...) rather than the
+# default benches/benches/, so disable autodiscovery and list them explicitly.
+autobenches = false
+
+# Shared bench helpers (workload generators) used by every bench file.
+[lib]
+path = "lib.rs"
+
+# The GPU bench is behind the `gpu` feature so the CPU bench stays buildable
+# without CUDA: `aes-gpu` (and its PTX build.rs) is only pulled in when enabled.
+[features]
+gpu = ["dep:aes-gpu"]
+
+[dependencies]
+aes-core = { path = "../crates/aes-core" }
+aes-cpu = { path = "../crates/aes-cpu" }
+aes-gpu = { path = "../crates/aes-gpu", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "cpu"
+path = "cpu.rs"
+harness = false
+
+[[bench]]
+name = "gpu"
+path = "gpu.rs"
+harness = false
+required-features = ["gpu"]

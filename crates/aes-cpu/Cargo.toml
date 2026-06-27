@@ -1,0 +1,11 @@
+[package]
+name = "aes-cpu"
+version = "0.1.0"
+edition = "2024"
+
+# CPU AES-128 backends used as the benchmark baseline for the GPU kernels.
+# Host-only (std + CPU intrinsics), so this lives outside the `kernels` device
+# crate. Builds without CUDA. The benchmarks live in the top-level `benches`
+# crate (`aes-bench`) so all backends are timed side by side.
+[dependencies]
+aes-core = { path = "../aes-core" }

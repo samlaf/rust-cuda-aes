@@ -1,40 +1,92 @@
 # Rust-Cuda AES
 
 A [rust-cuda](https://rust-gpu.github.io/rust-cuda) port of Cihangir Tezcan's
-table-based AES-128 CUDA implementation, built up one optimization at a time.
+table-based AES-128 CUDA implementation, built up one optimization at a time,
+with CPU baselines (scalar + VAES) to benchmark the GPU kernels against.
 
-- Host code: `src/main.rs`
-- Kernels + tables: `kernels/src/lib.rs`
+## Layout
 
-Build & run (needs an NVIDIA GPU + CUDA toolkit):
+Host-side library crates live under `crates/`; the repo root is a virtual
+workspace. The two crates that aren't host workspace members sit at the top
+level: `benches/` (all benchmarks) and `kernels/` (the GPU device code).
+
+| Crate | Target | Role |
+|-------|--------|------|
+| `crates/aes-core/` | portable, `#![no_std]` | Shared primitives: constant tables, key schedule, `encrypt_block` + the FIPS-197 KAT tests. Depended on by everything; no deps of its own. |
+| `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (T-table, works) and `vaes` (AES-NI/VAES, x86_64 — TODO). |
+| `crates/aes-gpu/` | host (std) | GPU backend **library**: builds the PTX (`build.rs`), embeds it, and exposes `AesGpu` to upload inputs and launch the kernel. Round-trip test against FIPS-197. |
+| `kernels/` | `nvptx64` (GPU) | The GPU kernels, compiled to PTX. Depends on `aes-core`. Standalone (its own workspace, not a member) so `CudaBuilder` builds it in isolation. |
+| `benches/` | host (std) | `aes-bench`: criterion benchmarks for every backend (`cpu.rs`; `gpu.rs` behind the `gpu` feature). |
+
+The same `aes_core::encrypt_block` runs on the GPU, in the CPU scalar backend,
+and in the tests, so the known-answer tests exercise the exact code the kernel
+runs.
+
+All benchmarks live together in the top-level `benches/` crate (`aes-bench`),
+one bench file per concern (`cpu.rs`, `gpu.rs`) sharing the same workload helpers
+and the same `aes128-ecb` group, so the CPU and GPU throughput numbers are
+directly comparable. `gpu.rs` also reports an `aes128-latency` group timing the
+single-block kernel's per-launch round-trip — the fixed overhead that batching
+amortizes. The GPU bench is behind a `gpu` feature, so the CPU bench builds
+without CUDA.
+
+## Test & benchmark
+
+Logic tests + CPU benchmark — table generation and the shared encryption logic
+against FIPS-197 known answers (host-only, **no GPU/CUDA required**):
 
 ```bash
-cargo run --release
+cargo test  -p aes-core
+cargo test  -p aes-cpu
+cargo bench -p aes-bench --bench cpu
 ```
 
-Test (host-only, no GPU/CUDA required — runs the table generation and the
-shared encryption logic against FIPS-197 known answers):
+GPU round-trip test + benchmark — builds the kernel and runs it on the device
+(needs an NVIDIA GPU + CUDA toolkit):
 
 ```bash
-cargo test --manifest-path kernels/Cargo.toml
+cargo test  -p aes-gpu
+cargo bench -p aes-bench --features gpu --bench gpu
 ```
 
 ## Status
 
-**Step 1 — naive table-based baseline (current).** A single thread encrypts one
-16-byte block: T-tables `T0..T3` for rounds 1–9, S-box for the last round, all
-in plain global memory. Verified against the FIPS-197 known-answer test
-(`3243f6a8… → 3925841d…`). The S-box, T-tables and `RCON` are generated at
-compile time via `const fn` from GF(2⁸) first principles.
+**Step 1 — naive table-based baseline (current).** T-tables `T0..T3` for rounds
+1–9, S-box for the last round, all in plain global memory. Two kernels:
+`aes128_encrypt_block` (one thread, one block — used by the round-trip test) and
+`aes128_encrypt_blocks` (one thread per block — the benchmark workload). Verified
+against the FIPS-197 known-answer test (`3243f6a8… → 3925841d…`). The S-box,
+T-tables and `RCON` are generated at compile time via `const fn` from GF(2⁸)
+first principles.
 
 ## TODO / next steps
 
 Each step layers one of the paper's optimizations onto the previous, keeping the
 KAT green throughout:
 
-- [ ] **CTR mode** — replace the single-block kernel with the counter-mode
-      structure from `128-ctr.cuh`: each thread encrypts a range of consecutive
-      counter values. This is the real workload to benchmark.
+- [ ] **CPU VAES backend** — implement `crates/aes-cpu/src/vaes.rs` with AES-NI
+      (`_mm_aesenc_si128`), then widen to VAES (`_mm256/512_aesenc_epi128`).
+- [ ] **CTR mode** — extend the batch kernel to the counter-mode structure from
+      `128-ctr.cuh`, where each thread encrypts a range of consecutive counter
+      values (better arithmetic intensity than one block per thread). Notes:
+    - CTR builds a keystream: `ct[i] = pt[i] ⊕ E(k, counter₀ + i)`; the cipher is
+      applied to the counter, not the plaintext.
+    - This **subsumes the ECB kernel** — we can drop `aes128_encrypt_block` /
+      `encrypt_block` and run the FIPS-197 KAT through CTR: set `counter₀ = PT`
+      and `pt = 0`, then `ct = E(k, PT) = 3925841d…` (the "extract one keystream
+      block" trick). One kernel then serves the throughput bench, the latency
+      bench (1 block), and the correctness test.
+    - Caveat: FIPS-via-CTR only exercises the **cipher core** — with one block and
+      zero plaintext the counter never increments and the XOR is a no-op. Add a
+      multi-block test for the mode itself: NIST SP 800-38A F.5.1 vectors, or
+      cross-check the GPU output against a CPU CTR built from the FIPS-verified
+      `aes_core::encrypt_block`.
+    - The counter is derived on-device from the thread index, so a keystream-only
+      path (no XOR) needs **no plaintext upload** — that's what makes the "time
+      the kernel without host transfers" measurement clean.
+    - Counter convention: increment the low 32-bit big-endian word of the counter
+      block (matches NIST F.5.1, where all increments stay in the low word, e.g.
+      `…fcfdfeff → …fcfdff00`).
 - [ ] **Tables → shared memory** — copy the T-tables from global into shared
       memory at kernel start (the paper's ~10× baseline win).
 - [ ] **One table + `__byte_perm`** — keep only `T0` in shared memory; derive
@@ -42,8 +94,9 @@ KAT green throughout:
 - [ ] **Bank-conflict-free** — replicate `T0` (and the last-round S-box) across
       all 32 shared-memory banks (`t0S[256][32]`) so each warp lane reads its own
       bank. This is the paper's core contribution.
-- [ ] **Benchmarking** — measure throughput (Gbps) and compare against the
-      paper's reported numbers.
+- [x] **GPU benchmarking** — `aes128_encrypt_blocks` (one thread per block) is
+      benched end-to-end alongside the CPU backends. Next: time the kernel
+      without the host transfers, and compare throughput (Gbps) to the paper.
 
 Explicitly out of scope (for now): the exhaustive-search / key-recovery kernels.
 

@@ -1,12 +1,11 @@
-[package]
-name = "rust-cuda-aes"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-cust = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d717038a92c90bf4a482b0b8dd3259344" }
-kernels = { path = "kernels" }
-
-[build-dependencies]
-cuda_builder = { git = "https://github.com/rust-gpu/rust-cuda", rev = "7fa76f3d717038a92c90bf4a482b0b8dd3259344", features = ["rustc_codegen_nvvm"] }
-
+# Virtual workspace root. The host-side library crates live under `crates/`; the
+# top-level `benches/` crate holds all benchmarks, and the top-level `kernels/`
+# crate is the GPU device code.
+#
+# `kernels/` is intentionally NOT a member: it's compiled to PTX by
+# `crates/aes-gpu/build.rs` via `CudaBuilder` for the nvptx64 target, so it stays
+# isolated from this (std, host) resolver. Its own `[workspace]` table is what
+# keeps it out — no `exclude` entry needed.
+[workspace]
+resolver = "3"
+members = ["crates/aes-core", "crates/aes-cpu", "crates/aes-gpu", "benches"]
