@@ -1,63 +1,84 @@
 use cust::prelude::*;
-use kernels::T;
+use kernels::{key_expansion, SBOX_U32, T0, T1, T2, T3};
 use std::error::Error;
 
 // Embed the PTX code as a static string.
 static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // FIPS-197 Appendix B known-answer test.
+    let pt: [u32; 4] = [0x3243F6A8, 0x885A308D, 0x313198A2, 0xE0370734];
+    let key: [u32; 4] = [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C];
+    let expected: [u32; 4] = [0x3925841D, 0x02DC09FB, 0xDC118597, 0x196A0B32];
+
+    let rk = key_expansion(key);
+
     // Initialize the CUDA Driver API. `_ctx` must be kept alive until the end.
     let _ctx = cust::quick_init()?;
-
-    // Create a module from the PTX code compiled by `cuda_builder`.
     let module = Module::from_ptx(PTX, &[])?;
-
-    // Create a stream, which is like a thread for dispatching GPU calls.
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-    // Initialize input and output buffers in CPU memory.
-    let a: [T; _] = [1.0, 2.0, 3.0, 4.0];
-    let b: [T; _] = [2.0, 3.0, 4.0, 5.0];
-    let mut c: Vec<T> = vec![0.0 as T; a.len()];
+    // Upload everything the kernel needs.
+    let pt_gpu = pt.as_dbuf()?;
+    let rk_gpu = rk.as_dbuf()?;
+    let t0_gpu = T0.as_dbuf()?;
+    let t1_gpu = T1.as_dbuf()?;
+    let t2_gpu = T2.as_dbuf()?;
+    let t3_gpu = T3.as_dbuf()?;
+    let sbox_gpu = SBOX_U32.as_dbuf()?;
 
-    // Allocate memory on the GPU and copy the contents from the CPU memory.
-    let a_gpu = a.as_dbuf()?;
-    let b_gpu = b.as_dbuf()?;
-    let c_gpu = c.as_slice().as_dbuf()?;
+    let mut ct = vec![0u32; 4];
+    let ct_gpu = ct.as_slice().as_dbuf()?;
 
-    // Launch the kernel on the GPU.
-    // - The first two parameters between the triple angle brackets specify 1
-    //   block of 4 threads.
-    // - The third parameter is the number of bytes of dynamic shared memory.
-    //   This is usually zero.
-    // - These threads run in parallel, so each kernel invocation must modify
-    //   separate parts of `c_gpu`. It is the kernel author's responsibility to
-    //   ensure this.
-    // - Immutable slices are passed via pointer/length pairs. This is unsafe
-    //   because the kernel function is unsafe, but also because, like an FFI
-    //   call, any mismatch between this call and the called kernel could
-    //   result in incorrect behaviour or even uncontrolled crashes.
-    let add_kernel = module.get_function("add")?;
+    // One block, one thread.
+    let kernel = module.get_function("aes128_encrypt_block")?;
     unsafe {
         launch!(
-            add_kernel<<<1, 4, 0, stream>>>(
-                a_gpu.as_device_ptr(),
-                a_gpu.len(),
-                b_gpu.as_device_ptr(),
-                b_gpu.len(),
-                c_gpu.as_device_ptr(),
+            kernel<<<1, 1, 0, stream>>>(
+                pt_gpu.as_device_ptr(),
+                pt_gpu.len(),
+                rk_gpu.as_device_ptr(),
+                rk_gpu.len(),
+                t0_gpu.as_device_ptr(),
+                t0_gpu.len(),
+                t1_gpu.as_device_ptr(),
+                t1_gpu.len(),
+                t2_gpu.as_device_ptr(),
+                t2_gpu.len(),
+                t3_gpu.as_device_ptr(),
+                t3_gpu.len(),
+                sbox_gpu.as_device_ptr(),
+                sbox_gpu.len(),
+                ct_gpu.as_device_ptr(),
             )
         )?;
     }
 
-    // Synchronize all threads, i.e. ensure they have all completed before continuing.
     stream.synchronize()?;
+    ct_gpu.copy_to(&mut ct)?;
 
-    // Copy the GPU memory back to the CPU.
-    c_gpu.copy_to(&mut c)?;
+    println!(
+        "plaintext  : {:08x} {:08x} {:08x} {:08x}",
+        pt[0], pt[1], pt[2], pt[3]
+    );
+    println!(
+        "key        : {:08x} {:08x} {:08x} {:08x}",
+        key[0], key[1], key[2], key[3]
+    );
+    println!(
+        "ciphertext : {:08x} {:08x} {:08x} {:08x}",
+        ct[0], ct[1], ct[2], ct[3]
+    );
+    println!(
+        "expected   : {:08x} {:08x} {:08x} {:08x}",
+        expected[0], expected[1], expected[2], expected[3]
+    );
 
-    println!("c = {:?}", c);
-
-    Ok(())
+    if ct == expected {
+        println!("KAT: PASS");
+        Ok(())
+    } else {
+        println!("KAT: FAIL");
+        Err("ciphertext does not match FIPS-197 known answer".into())
+    }
 }
-
