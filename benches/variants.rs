@@ -45,9 +45,48 @@ impl Aes for CpuScalar {
     }
 }
 
-/// Every CPU variant, in tutorial order.
+/// AES-NI, one block at a time (`encrypt_ctr::<1>`), x86_64 only. The
+/// latency-bound baseline the interleaved `cpu/aesni-x8` is measured against.
+#[cfg(target_arch = "x86_64")]
+pub struct CpuAesNi;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuAesNi {
+    fn name(&self) -> &str {
+        "cpu/aesni"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::aesni::encrypt_ctr::<1>(rk, counter0, blocks, out);
+    }
+}
+
+/// AES-NI with 8-way block interleaving (`encrypt_ctr::<8>`), x86_64 only. Hides
+/// the ~4-cycle AESENC latency that the one-block `cpu/aesni` is bound by, so it
+/// should be several times faster on the same core.
+#[cfg(target_arch = "x86_64")]
+pub struct CpuAesNiX8;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuAesNiX8 {
+    fn name(&self) -> &str {
+        "cpu/aesni-x8"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::aesni::encrypt_ctr::<8>(rk, counter0, blocks, out);
+    }
+}
+
+/// Every CPU variant available on this target, in tutorial order. The AES-NI
+/// variants are added only on an x86_64 CPU that actually has AES-NI.
 pub fn cpu_variants() -> Vec<Box<dyn Aes>> {
-    vec![Box::new(CpuScalar)]
+    #[allow(unused_mut)]
+    let mut v: Vec<Box<dyn Aes>> = vec![Box::new(CpuScalar)];
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("aes") {
+        v.push(Box::new(CpuAesNi));
+        v.push(Box::new(CpuAesNiX8));
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------

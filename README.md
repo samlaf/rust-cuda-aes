@@ -13,7 +13,7 @@ level: `benches/` (all benchmarks) and `kernels/` (the GPU device code).
 | Crate | Target | Role |
 |-------|--------|------|
 | `crates/aes-core/` | portable, `#![no_std]` | Shared primitives: constant tables, key schedule, `encrypt_block` (round function) + `encrypt_ctr_block` (CTR) + the FIPS-197 and NIST F.5.1 KAT vectors. Depended on by everything; no deps of its own. |
-| `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (T-table, works) and `vaes` (AES-NI/VAES, x86_64 — TODO). |
+| `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (portable T-table CTR) and `aesni` (AES-NI hardware AES, x86_64); `vaes` (wider VAES, needs AVX-512) is still a TODO. |
 | `crates/aes-gpu/` | host (std) | GPU backend **library**: builds the PTX (`build.rs`), embeds it, and exposes `AesGpu::encrypt_ctr` to upload inputs and launch the CTR kernel. Round-trip tests against FIPS-197 + NIST F.5.1. |
 | `kernels/` | `nvptx64` (GPU) | The GPU kernel (`aes128_ctr`), compiled to PTX. Depends on `aes-core`. Standalone (its own workspace, not a member) so `CudaBuilder` builds it in isolation. |
 | `benches/` | host (std) | `aes-bench`: an `Aes`-variant registry (`variants.rs`) plus criterion benches that iterate it — `throughput.rs` (every backend in one comparable group, GPU variants behind the `gpu` feature) and `latency.rs` (GPU single-block; `gpu`-only). |
@@ -82,21 +82,19 @@ is the round function (`aes_core::encrypt_block`) that CTR now drives.
 Each step layers one of the paper's optimizations onto the previous, keeping the
 KAT green throughout:
 
-- [ ] **CPU VAES backend** — implement `crates/aes-cpu/src/vaes.rs` with AES-NI
-      (`_mm_aesenc_si128`), then widen to VAES (`_mm256/512_aesenc_epi128`).
-- [x] **CTR mode** — done (Step 2 above). One `aes128_ctr` kernel builds the
-      keystream `ct[i] = pt[i] ⊕ E(k, counter₀ + i)` (cipher applied to the
-      counter; low-word increment, NIST F.5.1 convention) and subsumes both ECB
-      kernels via the runtime `blocks_per_thread` (`R`) knob. Gated on FIPS-197
-      (cipher core, via the `counter₀ = PT, pt = 0` trick) **and** the NIST SP
-      800-38A F.5.1 multi-block vectors (the mode itself). Deferred follow-ups:
-    - **`R > 1` sweep** — the kernel already takes `R` at runtime; register
-      `gpu/…-range-{4,8,16}` variants (one line each) for the paper's
-      arithmetic-intensity win, each thread reusing the round keys/tables across
-      `R` consecutive counters.
-    - **Keystream-only path** — the counter is derived on-device from the thread
-      index, so a no-XOR variant needs **no plaintext upload**; that's what makes
-      a clean "time the kernel without host transfers" measurement.
+- [ ] **CPU multi-core** — fan `cpu/aesni-x8` across cores with `rayon`
+      (`cpu/aesni-x8-parallel`). With ~4 vCPUs this is the rest of the gap to the
+      paper's whole-chip CPU numbers.
+- [ ] **CPU VAES backend** — widen `crates/aes-cpu/src/vaes.rs` to 2/4 blocks per
+      instruction (`_mm256/512_aesenc_epi128`). Needs AVX-512 + `vaes`; the dev
+      box's Zen 2 EPYC has neither, so this waits for a capable CPU.
+- [ ] **GPU `R > 1` sweep** — the `aes128_ctr` kernel already takes
+      `blocks_per_thread` (`R`) at runtime; register `gpu/…-range-{4,8,16}`
+      variants (one line each) for the paper's arithmetic-intensity win, each
+      thread reusing the round keys/tables across `R` consecutive counters.
+- [ ] **GPU keystream-only path** — the counter is derived on-device from the
+      thread index, so a no-XOR variant needs **no plaintext upload**; that's what
+      makes a clean "time the kernel without host transfers" measurement.
 - [ ] **Tables → shared memory** — copy the T-tables from global into shared
       memory at kernel start (the paper's ~10× baseline win).
 - [ ] **One table + `__byte_perm`** — keep only `T0` in shared memory; derive
@@ -104,9 +102,6 @@ KAT green throughout:
 - [ ] **Bank-conflict-free** — replicate `T0` (and the last-round S-box) across
       all 32 shared-memory banks (`t0S[256][32]`) so each warp lane reads its own
       bank. This is the paper's core contribution.
-- [x] **GPU benchmarking** — `aes128_ctr` at `R = 1` (one thread per block) is
-      benched end-to-end alongside the CPU backends. Next: time the kernel
-      without the host transfers, and compare throughput (Gbps) to the paper.
 
 Explicitly out of scope (for now): the exhaustive-search / key-recovery kernels.
 
