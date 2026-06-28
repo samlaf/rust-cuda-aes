@@ -42,6 +42,43 @@ pub const KAT_VECTORS: &[([u32; 4], [u32; 4], [u32; 4])] = &[
     ),
 ];
 
+/// A multi-block CTR-mode known-answer vector: the cipher-core [`KAT_VECTORS`]
+/// only exercise `encrypt_block`, so they say nothing about the *mode* (counter
+/// increment + keystream XOR). This pins the mode itself.
+pub struct CtrKat {
+    /// 4 key words (big-endian within each word).
+    pub key: [u32; 4],
+    /// Initial counter block; block `i` encrypts `counter0` with its low 32-bit
+    /// word increased by `i` (see [`encrypt_ctr_block`]).
+    pub counter0: [u32; 4],
+    /// Plaintext blocks, in order.
+    pub plaintext: [[u32; 4]; 4],
+    /// Expected ciphertext blocks, in order.
+    pub ciphertext: [[u32; 4]; 4],
+}
+
+/// NIST SP 800-38A Appendix F.5.1 (CTR-AES128.Encrypt). The single source of
+/// truth for CTR-mode correctness, shared by every backend's tests. The key is
+/// the same FIPS-197 Appendix B key used in [`KAT_VECTORS`]; the four-block
+/// counter sequence `…fcfdfeff → …fcfdff00 → …ff01 → …ff02` is what fixes the
+/// low-word increment convention.
+pub const CTR_KAT: CtrKat = CtrKat {
+    key: [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C],
+    counter0: [0xF0F1F2F3, 0xF4F5F6F7, 0xF8F9FAFB, 0xFCFDFEFF],
+    plaintext: [
+        [0x6BC1BEE2, 0x2E409F96, 0xE93D7E11, 0x7393172A],
+        [0xAE2D8A57, 0x1E03AC9C, 0x9EB76FAC, 0x45AF8E51],
+        [0x30C81C46, 0xA35CE411, 0xE5FBC119, 0x1A0A52EF],
+        [0xF69F2445, 0xDF4F9B17, 0xAD2B417B, 0xE66C3710],
+    ],
+    ciphertext: [
+        [0x874D6191, 0xB620E326, 0x1BEF6864, 0x990DB6CE],
+        [0x9806F66B, 0x7970FDFF, 0x8617187B, 0xB9FFFDFF],
+        [0x5AE4DF3E, 0xDBD5D35E, 0x5B4F0902, 0x0DB03EAB],
+        [0x1E031DDA, 0x2FBE03D1, 0x792170A0, 0xF3009CEE],
+    ],
+};
+
 // ---------------------------------------------------------------------------
 // AES-128 key schedule (host-side; round keys are uploaded to the GPU).
 // ---------------------------------------------------------------------------
@@ -147,9 +184,49 @@ pub fn encrypt_block(
     [o0 ^ rk[40], o1 ^ rk[41], o2 ^ rk[42], o3 ^ rk[43]]
 }
 
+// ---------------------------------------------------------------------------
+// CTR mode: apply the cipher to a counter, XOR the keystream into the plaintext.
+// ---------------------------------------------------------------------------
+
+/// Encrypt one CTR-mode block: `ct = pt ⊕ E(k, counter)`.
+///
+/// The counter for block `index` is `counter0` with its **low 32-bit word**
+/// increased by `index` (`counter0[3].wrapping_add(index)`), matching NIST SP
+/// 800-38A F.5: the increment stays in the low word and never carries (good for
+/// up to 2^32 blocks per nonce). The cipher is applied to the counter, not to
+/// `pt`, so this is the exact building block both the GPU kernel and the CPU
+/// backend loop over — keeping the keystream identical across backends.
+///
+/// Parameters mirror [`encrypt_block`]; `index` is the block's position in the
+/// counter sequence.
+#[inline]
+#[allow(clippy::too_many_arguments)] // tables are passed explicitly (no globals on the GPU)
+pub fn encrypt_ctr_block(
+    counter0: [u32; 4],
+    index: u32,
+    pt: [u32; 4],
+    rk: &[u32],
+    t0: &[u32],
+    t1: &[u32],
+    t2: &[u32],
+    t3: &[u32],
+    sbox: &[u32],
+) -> [u32; 4] {
+    let counter = [
+        counter0[0],
+        counter0[1],
+        counter0[2],
+        counter0[3].wrapping_add(index),
+    ];
+    let ks = encrypt_block(counter, rk, t0, t1, t2, t3, sbox);
+    [pt[0] ^ ks[0], pt[1] ^ ks[1], pt[2] ^ ks[2], pt[3] ^ ks[3]]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encrypt_block, key_expansion, SBOX_U32, T0, T1, T2, T3};
+    use super::{
+        encrypt_block, encrypt_ctr_block, key_expansion, CTR_KAT, SBOX_U32, T0, T1, T2, T3,
+    };
 
     /// Run the shared `encrypt_block` against a FIPS-197 known-answer test.
     fn kat(pt: [u32; 4], key: [u32; 4]) -> [u32; 4] {
@@ -171,6 +248,32 @@ mod tests {
         // table-based round function the kernel and CPU backends use.
         for &(pt, key, expected) in crate::KAT_VECTORS {
             assert_eq!(kat(pt, key), expected);
+        }
+    }
+
+    #[test]
+    fn nist_f51_ctr() {
+        // The CTR-mode vector (NIST SP 800-38A F.5.1) exercises the counter
+        // increment and the keystream XOR, which the cipher-core KATs don't.
+        let rk = key_expansion(CTR_KAT.key);
+        for (i, (&pt, &expected)) in CTR_KAT
+            .plaintext
+            .iter()
+            .zip(CTR_KAT.ciphertext.iter())
+            .enumerate()
+        {
+            let ct = encrypt_ctr_block(
+                CTR_KAT.counter0,
+                i as u32,
+                pt,
+                &rk,
+                &T0,
+                &T1,
+                &T2,
+                &T3,
+                &SBOX_U32,
+            );
+            assert_eq!(ct, expected, "CTR block {i} mismatch");
         }
     }
 }

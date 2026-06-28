@@ -48,70 +48,51 @@ impl AesGpu {
         })
     }
 
-    /// Encrypt a single 16-byte block on the GPU.
+    /// Encrypt many 16-byte blocks in CTR mode: `out[i] = blocks[i] ⊕ E(rk,
+    /// counter0 + i)`.
     ///
-    /// `pt` is 4 plaintext words (big-endian within each word) and `rk` is the
-    /// 44-word expanded key from [`aes_core::key_expansion`]. Returns the 4
-    /// ciphertext words.
-    pub fn encrypt_block(&self, pt: [u32; 4], rk: &[u32]) -> CudaResult<[u32; 4]> {
-        let pt_gpu = pt.as_dbuf()?;
-        let rk_gpu = rk.as_dbuf()?;
-        let mut ct = [0u32; 4];
-        let ct_gpu = ct.as_dbuf()?;
-
-        let kernel = self.module.get_function("aes128_encrypt_block")?;
-        // `launch!` wants the stream as a plain identifier.
-        let stream = &self.stream;
-        // One block, one thread (the naive baseline kernel).
-        unsafe {
-            launch!(
-                kernel<<<1, 1, 0, stream>>>(
-                    pt_gpu.as_device_ptr(), pt_gpu.len(),
-                    rk_gpu.as_device_ptr(), rk_gpu.len(),
-                    self.t0.as_device_ptr(), self.t0.len(),
-                    self.t1.as_device_ptr(), self.t1.len(),
-                    self.t2.as_device_ptr(), self.t2.len(),
-                    self.t3.as_device_ptr(), self.t3.len(),
-                    self.sbox.as_device_ptr(), self.sbox.len(),
-                    ct_gpu.as_device_ptr(),
-                )
-            )?;
-        }
-        self.stream.synchronize()?;
-        ct_gpu.copy_to(&mut ct)?;
-        Ok(ct)
-    }
-
-    /// Encrypt many 16-byte blocks (ECB), one GPU thread per block.
+    /// `rk` is the 44-word expanded key; `counter0` is the initial counter block
+    /// (incremented per block in its low 32-bit word, see
+    /// [`aes_core::encrypt_ctr_block`]); `out` must be the same length as
+    /// `blocks`. `blocks_per_thread` (`R`) is how many consecutive blocks each
+    /// GPU thread covers — `R = 1` is one-thread-per-block, `R > 1` trades
+    /// threads for per-thread arithmetic intensity; `n_blocks = 1` is the
+    /// single-block latency path.
     ///
-    /// `rk` is the 44-word expanded key; `out` must be the same length as
-    /// `blocks`. End-to-end: uploads the inputs, launches the batch kernel, and
-    /// copies the ciphertext back — that whole cost is what the GPU benchmark
-    /// measures.
-    pub fn encrypt_blocks(
+    /// End-to-end: uploads the inputs, launches the kernel, and copies the
+    /// ciphertext back — that whole cost is what the GPU benchmark measures.
+    pub fn encrypt_ctr(
         &self,
         rk: &[u32],
+        counter0: [u32; 4],
         blocks: &[[u32; 4]],
         out: &mut [[u32; 4]],
+        blocks_per_thread: usize,
     ) -> CudaResult<()> {
         let n = blocks.len();
         if n == 0 {
             return Ok(());
         }
         debug_assert_eq!(out.len(), n, "output length must match the input");
+        let r = blocks_per_thread.max(1);
 
+        let counter0_gpu = counter0.as_dbuf()?;
         let pt_gpu = blocks.as_flattened().as_dbuf()?;
         let rk_gpu = rk.as_dbuf()?;
         let ct_gpu = DeviceBuffer::<u32>::zeroed(n * 4)?;
 
-        let kernel = self.module.get_function("aes128_encrypt_blocks")?;
+        let kernel = self.module.get_function("aes128_ctr")?;
+        // `launch!` wants the stream as a plain identifier.
         let stream = &self.stream;
-        // One thread per block; round the grid up to a whole block of threads.
+        // Each thread covers `r` blocks; round the thread count up to that, then
+        // round the grid up to whole thread-blocks.
         const BLOCK: u32 = 256;
-        let grid = (n as u32).div_ceil(BLOCK);
+        let threads = (n as u32).div_ceil(r as u32);
+        let grid = threads.div_ceil(BLOCK);
         unsafe {
             launch!(
                 kernel<<<grid, BLOCK, 0, stream>>>(
+                    counter0_gpu.as_device_ptr(), counter0_gpu.len(),
                     pt_gpu.as_device_ptr(), pt_gpu.len(),
                     rk_gpu.as_device_ptr(), rk_gpu.len(),
                     self.t0.as_device_ptr(), self.t0.len(),
@@ -121,6 +102,7 @@ impl AesGpu {
                     self.sbox.as_device_ptr(), self.sbox.len(),
                     ct_gpu.as_device_ptr(),
                     n,
+                    r,
                 )
             )?;
         }
@@ -133,19 +115,31 @@ impl AesGpu {
 #[cfg(test)]
 mod tests {
     use super::AesGpu;
-    use aes_core::{key_expansion, KAT_VECTORS};
+    use aes_core::{key_expansion, CTR_KAT, KAT_VECTORS};
 
-    /// Round-trips the shared FIPS-197 vectors through the real kernel (upload,
+    /// Round-trips the shared known answers through the real CTR kernel (upload,
     /// launch, download). Requires an NVIDIA GPU + CUDA toolkit, so it only runs
-    /// on a CUDA host — the crate doesn't build without one. A single `AesGpu` is
-    /// shared so the CUDA context is initialized exactly once.
+    /// on a CUDA host — the crate doesn't build without one. One `AesGpu` is
+    /// shared across both checks so the CUDA context is initialized exactly once.
     #[test]
-    fn gpu_matches_fips197() {
+    fn gpu_matches_known_answers() {
         let gpu = AesGpu::new().expect("CUDA init failed (needs an NVIDIA GPU)");
+
+        // Cipher core: with counter0 = PT and zero plaintext, out[0] = E(k, PT),
+        // so the FIPS-197 vectors check the round function through the CTR path.
         for &(pt, key, expected) in KAT_VECTORS {
             let rk = key_expansion(key);
-            let ct = gpu.encrypt_block(pt, &rk).expect("kernel launch failed");
-            assert_eq!(ct, expected, "GPU ciphertext mismatch for pt={pt:08x?}");
+            let mut out = [[0u32; 4]];
+            gpu.encrypt_ctr(&rk, pt, &[[0u32; 4]], &mut out, 1)
+                .expect("kernel launch failed");
+            assert_eq!(out[0], expected, "GPU cipher-core mismatch for pt={pt:08x?}");
         }
+
+        // CTR mode itself (counter increment + keystream XOR): NIST F.5.1.
+        let rk = key_expansion(CTR_KAT.key);
+        let mut out = [[0u32; 4]; 4];
+        gpu.encrypt_ctr(&rk, CTR_KAT.counter0, &CTR_KAT.plaintext, &mut out, 1)
+            .expect("kernel launch failed");
+        assert_eq!(out, CTR_KAT.ciphertext, "GPU CTR-mode mismatch (NIST F.5.1)");
     }
 }

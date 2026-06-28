@@ -12,6 +12,6 @@
 //! Correctness gate: match the byte order of [`aes_core::encrypt_block`] and
 //! verify against the FIPS-197 Appendix B known answer before benchmarking.
 //!
-//! Expose a `pub fn encrypt_blocks(rk: &[u32], blocks: &[[u32; 4]], out: &mut [[u32; 4]])`
-//! mirroring [`crate::scalar::encrypt_blocks`] so the bench harness can swap
+//! Expose a `pub fn encrypt_ctr(rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]])`
+//! mirroring [`crate::scalar::encrypt_ctr`] so the bench harness can swap
 //! backends behind one signature.

@@ -23,7 +23,7 @@ aes-gpu = { path = "../crates/aes-gpu", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 
-# Throughput comparison: every backend variant in one `aes128-ecb` group. Builds
+# Throughput comparison: every backend variant in one `aes128-ctr` group. Builds
 # CPU-only by default; `--features gpu` adds the GPU variants to the same group.
 [[bench]]
 name = "throughput"

@@ -58,11 +58,11 @@ This is a **progressive-optimization tutorial**: each step adds one optimization
   `benches/variants.rs`. It is then automatically benchmarked (`throughput.rs`)
   and correctness-checked against `aes_core::KAT_VECTORS` (the cross-variant KAT
   test). Those are the rails — use them instead of bolting on one-off benches.
-- Every variant, CPU or GPU, must pass the shared FIPS-197 `KAT_VECTORS` in
-  `aes-core`. Non-negotiable correctness gate.
+- Every variant, CPU or GPU, must pass the shared `aes-core` KATs: the FIPS-197
+  `KAT_VECTORS` (cipher core, run through CTR via the `counter₀ = PT, pt = 0`
+  trick) and the NIST F.5.1 `CTR_KAT` (the mode itself). Non-negotiable gate.
 - Bench files are named by measurement axis (`throughput.rs`, `latency.rs`); the
-  cipher mode lives in the criterion group name (`aes128-ecb`, later
-  `aes128-ctr`).
+  cipher mode lives in the criterion group name (currently `aes128-ctr`).
 - `kernels/` is intentionally **not** a workspace member — it's its own
   workspace, compiled to PTX for `nvptx64` by `aes-gpu/build.rs`. Don't add it
   to `members`.

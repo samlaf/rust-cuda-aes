@@ -3,8 +3,7 @@
 //! Iterates the `aes_bench` variant registry and benches each entry in one
 //! criterion group over the shared workload, so the numbers line up directly.
 //! This file is named for the measurement axis (throughput), pairing with
-//! `latency.rs`; the criterion group is named for the cipher mode (`aes128-ecb`),
-//! so CTR can later get its own `aes128-ctr` group plotted alongside.
+//! `latency.rs`; the criterion group is named for the cipher mode (`aes128-ctr`).
 //!
 //! CPU variants run by default; `--features gpu` builds and appends the GPU
 //! variants to the same group:
@@ -14,11 +13,12 @@
 //! cargo bench -p aes-bench --features gpu --bench throughput  # CPU + GPU, side by side
 //! ```
 
-use aes_bench::{cpu_variants, demo_blocks, demo_round_keys, Aes, N_BLOCKS};
+use aes_bench::{cpu_variants, demo_blocks, demo_counter0, demo_round_keys, Aes, N_BLOCKS};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 fn bench_throughput(c: &mut Criterion) {
     let rk = demo_round_keys();
+    let counter0 = demo_counter0();
     let blocks = demo_blocks(N_BLOCKS);
     let mut out = vec![[0u32; 4]; N_BLOCKS];
 
@@ -28,11 +28,11 @@ fn bench_throughput(c: &mut Criterion) {
     #[cfg(feature = "gpu")]
     variants.extend(aes_bench::gpu_variants());
 
-    let mut group = c.benchmark_group("aes128-ecb");
+    let mut group = c.benchmark_group("aes128-ctr");
     group.throughput(Throughput::Bytes((N_BLOCKS * 16) as u64));
     for v in &variants {
         group.bench_function(v.name(), |b| {
-            b.iter(|| v.encrypt_blocks(black_box(&rk), black_box(&blocks), &mut out));
+            b.iter(|| v.encrypt_ctr(black_box(&rk), counter0, black_box(&blocks), &mut out));
         });
     }
     group.finish();
