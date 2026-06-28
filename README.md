@@ -16,37 +16,45 @@ level: `benches/` (all benchmarks) and `kernels/` (the GPU device code).
 | `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (T-table, works) and `vaes` (AES-NI/VAES, x86_64 — TODO). |
 | `crates/aes-gpu/` | host (std) | GPU backend **library**: builds the PTX (`build.rs`), embeds it, and exposes `AesGpu` to upload inputs and launch the kernel. Round-trip test against FIPS-197. |
 | `kernels/` | `nvptx64` (GPU) | The GPU kernels, compiled to PTX. Depends on `aes-core`. Standalone (its own workspace, not a member) so `CudaBuilder` builds it in isolation. |
-| `benches/` | host (std) | `aes-bench`: criterion benchmarks for every backend (`cpu.rs`; `gpu.rs` behind the `gpu` feature). |
+| `benches/` | host (std) | `aes-bench`: an `Aes`-variant registry (`variants.rs`) plus criterion benches that iterate it — `throughput.rs` (every backend in one comparable group, GPU variants behind the `gpu` feature) and `latency.rs` (GPU single-block; `gpu`-only). |
 
 The same `aes_core::encrypt_block` runs on the GPU, in the CPU scalar backend,
 and in the tests, so the known-answer tests exercise the exact code the kernel
 runs.
 
-All benchmarks live together in the top-level `benches/` crate (`aes-bench`),
-one bench file per concern (`cpu.rs`, `gpu.rs`) sharing the same workload helpers
-and the same `aes128-ecb` group, so the CPU and GPU throughput numbers are
-directly comparable. `gpu.rs` also reports an `aes128-latency` group timing the
-single-block kernel's per-launch round-trip — the fixed overhead that batching
-amortizes. The GPU bench is behind a `gpu` feature, so the CPU bench builds
-without CUDA.
+All benchmarks live together in the top-level `benches/` crate (`aes-bench`).
+Every kept backend is registered once in `variants.rs` as a named `Aes`
+implementation; `throughput.rs` iterates that registry into a single `aes128-ecb`
+group, so every variant — CPU scalar today, plus VAES and the GPU
+kernels as they land — is reported side by side and directly comparable. Adding
+an optimization step is a one-line entry in the registry, and the same registry
+is what the cross-backend known-answer test walks, so a new variant is benchmarked
+and correctness-checked the moment it's listed. `latency.rs` reports a separate
+`aes128-latency` group timing the single-block kernel's per-launch round-trip —
+the fixed overhead that batching amortizes. The GPU variants are behind a `gpu`
+feature, so the CPU comparison builds and runs without CUDA.
 
 ## Test & benchmark
 
 Logic tests + CPU benchmark — table generation and the shared encryption logic
-against FIPS-197 known answers (host-only, **no GPU/CUDA required**):
+against the shared FIPS-197 known answers (host-only, **no GPU/CUDA required**):
 
 ```bash
 cargo test  -p aes-core
 cargo test  -p aes-cpu
-cargo bench -p aes-bench --bench cpu
+cargo test  -p aes-bench              # KAT over every CPU variant in the registry
+cargo bench -p aes-bench --bench throughput
 ```
 
-GPU round-trip test + benchmark — builds the kernel and runs it on the device
-(needs an NVIDIA GPU + CUDA toolkit):
+GPU round-trip test + benchmarks — builds the kernel and runs it on the device,
+adding the GPU variants to the same `aes128-ecb` comparison (needs an NVIDIA GPU
++ CUDA toolkit):
 
 ```bash
 cargo test  -p aes-gpu
-cargo bench -p aes-bench --features gpu --bench gpu
+cargo test  -p aes-bench --features gpu          # KAT over CPU + GPU variants
+cargo bench -p aes-bench --features gpu --bench throughput
+cargo bench -p aes-bench --features gpu --bench latency
 ```
 
 ## Status

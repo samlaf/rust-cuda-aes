@@ -133,32 +133,16 @@ impl AesGpu {
 #[cfg(test)]
 mod tests {
     use super::AesGpu;
-    use aes_core::key_expansion;
+    use aes_core::{key_expansion, KAT_VECTORS};
 
-    // FIPS-197 known-answer vectors: (plaintext, key, ciphertext).
-    const VECTORS: &[([u32; 4], [u32; 4], [u32; 4])] = &[
-        // Appendix B
-        (
-            [0x3243F6A8, 0x885A308D, 0x313198A2, 0xE0370734],
-            [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C],
-            [0x3925841D, 0x02DC09FB, 0xDC118597, 0x196A0B32],
-        ),
-        // Appendix C.1
-        (
-            [0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF],
-            [0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F],
-            [0x69C4E0D8, 0x6A7B0430, 0xD8CDB780, 0x70B4C55A],
-        ),
-    ];
-
-    /// Round-trips the FIPS-197 vectors through the real kernel (upload, launch,
-    /// download). Requires an NVIDIA GPU + CUDA toolkit, so it only runs on a
-    /// CUDA host — the crate doesn't build without one. A single `AesGpu` is
+    /// Round-trips the shared FIPS-197 vectors through the real kernel (upload,
+    /// launch, download). Requires an NVIDIA GPU + CUDA toolkit, so it only runs
+    /// on a CUDA host — the crate doesn't build without one. A single `AesGpu` is
     /// shared so the CUDA context is initialized exactly once.
     #[test]
     fn gpu_matches_fips197() {
         let gpu = AesGpu::new().expect("CUDA init failed (needs an NVIDIA GPU)");
-        for &(pt, key, expected) in VECTORS {
+        for &(pt, key, expected) in KAT_VECTORS {
             let rk = key_expansion(key);
             let ct = gpu.encrypt_block(pt, &rk).expect("kernel launch failed");
             assert_eq!(ct, expected, "GPU ciphertext mismatch for pt={pt:08x?}");

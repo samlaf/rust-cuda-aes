@@ -2,7 +2,7 @@
 name = "aes-bench"
 version = "0.1.0"
 edition = "2024"
-# Bench files live directly in this dir (benches/cpu.rs, ...) rather than the
+# Bench files live directly in this dir (benches/ecb.rs, ...) rather than the
 # default benches/benches/, so disable autodiscovery and list them explicitly.
 autobenches = false
 
@@ -23,13 +23,16 @@ aes-gpu = { path = "../crates/aes-gpu", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 
+# Throughput comparison: every backend variant in one `aes128-ecb` group. Builds
+# CPU-only by default; `--features gpu` adds the GPU variants to the same group.
 [[bench]]
-name = "cpu"
-path = "cpu.rs"
+name = "throughput"
+path = "throughput.rs"
 harness = false
 
+# GPU single-block latency. GPU-only, so it requires the `gpu` feature.
 [[bench]]
-name = "gpu"
-path = "gpu.rs"
+name = "latency"
+path = "latency.rs"
 harness = false
 required-features = ["gpu"]

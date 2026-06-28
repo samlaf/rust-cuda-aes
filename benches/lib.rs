@@ -2,6 +2,9 @@
 //! and — eventually — the GPU kernels) is measured against the exact same
 //! workload.
 
+mod variants;
+pub use variants::*;
+
 use aes_core::key_expansion;
 
 /// Default workload size, in 16-byte blocks (`1 << 16` = 64Ki blocks = 1 MiB).

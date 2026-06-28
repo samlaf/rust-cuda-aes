@@ -23,16 +23,14 @@ mod tests {
 
     #[test]
     fn batch_matches_fips197() {
-        // Same FIPS-197 Appendix B vector, replicated across a batch.
-        let key = [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C];
-        let pt = [0x3243F6A8u32, 0x885A308D, 0x313198A2, 0xE0370734];
-        let expected = [0x3925841Du32, 0x02DC09FB, 0xDC118597, 0x196A0B32];
-
-        let rk = key_expansion(key);
-        let blocks = vec![pt; 64];
-        let mut out = vec![[0u32; 4]; 64];
-        encrypt_blocks(&rk, &blocks, &mut out);
-
-        assert!(out.iter().all(|&ct| ct == expected));
+        // Each shared FIPS-197 vector, replicated across a batch, must come back
+        // identical for every block.
+        for &(pt, key, expected) in aes_core::KAT_VECTORS {
+            let rk = key_expansion(key);
+            let blocks = vec![pt; 64];
+            let mut out = vec![[0u32; 4]; 64];
+            encrypt_blocks(&rk, &blocks, &mut out);
+            assert!(out.iter().all(|&ct| ct == expected));
+        }
     }
 }

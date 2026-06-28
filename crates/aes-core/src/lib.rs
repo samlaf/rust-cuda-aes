@@ -24,6 +24,24 @@
 mod tables;
 pub use tables::{RCON, SBOX, SBOX_U32, T0, T1, T2, T3};
 
+/// FIPS-197 known-answer vectors: `(plaintext, key, ciphertext)`, as big-endian
+/// words. Single source of truth shared by every backend's tests (CPU, GPU) and
+/// the benchmark variant registry, so they all check the exact same answers.
+pub const KAT_VECTORS: &[([u32; 4], [u32; 4], [u32; 4])] = &[
+    // Appendix B.
+    (
+        [0x3243F6A8, 0x885A308D, 0x313198A2, 0xE0370734],
+        [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C],
+        [0x3925841D, 0x02DC09FB, 0xDC118597, 0x196A0B32],
+    ),
+    // Appendix C.1.
+    (
+        [0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF],
+        [0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F],
+        [0x69C4E0D8, 0x6A7B0430, 0xD8CDB780, 0x70B4C55A],
+    ),
+];
+
 // ---------------------------------------------------------------------------
 // AES-128 key schedule (host-side; round keys are uploaded to the GPU).
 // ---------------------------------------------------------------------------
@@ -148,20 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn fips197_appendix_b() {
-        let ct = kat(
-            [0x3243F6A8, 0x885A308D, 0x313198A2, 0xE0370734],
-            [0x2B7E1516, 0x28AED2A6, 0xABF71588, 0x09CF4F3C],
-        );
-        assert_eq!(ct, [0x3925841D, 0x02DC09FB, 0xDC118597, 0x196A0B32]);
-    }
-
-    #[test]
-    fn fips197_appendix_c1() {
-        let ct = kat(
-            [0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF],
-            [0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F],
-        );
-        assert_eq!(ct, [0x69C4E0D8, 0x6A7B0430, 0xD8CDB780, 0x70B4C55A]);
+    fn fips197_known_answers() {
+        // Every vector in the shared FIPS-197 set round-trips through the same
+        // table-based round function the kernel and CPU backends use.
+        for &(pt, key, expected) in crate::KAT_VECTORS {
+            assert_eq!(kat(pt, key), expected);
+        }
     }
 }
