@@ -1,2 +1,5 @@
 **/target
 .env
+
+# Per-machine, per-developer Claude Code context (imported by CLAUDE.md).
+CLAUDE.local.md
