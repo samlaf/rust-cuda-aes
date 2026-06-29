@@ -100,7 +100,51 @@ KAT green throughout:
       all 32 shared-memory banks (`t0S[256][32]`) so each warp lane reads its own
       bank. This is the paper's core contribution.
 
-Explicitly out of scope (for now): the exhaustive-search / key-recovery kernels.
+## TODO: Benchmarks
+
+Improvements to the measurement harness itself (orthogonal to the optimization
+roadmap above):
+
+- [ ] **Block-size sweep (criterion inputs)** — `throughput.rs` benches a single
+      fixed `N_BLOCKS` (`1<<16`); seeing the cache→DRAM *memory wall* currently
+      means editing the const and rebuilding. Switch to
+      [`bench_with_input`](https://bheisler.github.io/criterion.rs/book/user_guide/benchmarking_with_inputs.html)
+      over a range of sizes (e.g. `1<<10 … 1<<22`) with a per-input
+      `Throughput::Bytes`, so the report charts throughput vs working-set size
+      and the wall shows up directly. (Watch the combinatorics: variants × sizes
+      × ~5s each.)
+- [ ] **Interleave-width (`W`) sweep** — `W` is a compile-time const generic, so
+      this is *not* a criterion runtime input: add registry variants
+      (`cpu/aesni-x{1,2,4,8,16}-pshufb`) or a dedicated tuning bench to find the
+      per-microarch optimum and demonstrate the "W is a knob" point (≈4 on
+      Skylake, ≈8 on Zen).
+- [ ] **Hardware perf counters in the harness** — swap criterion's wall-clock
+      measurement for a perf-counter one (cycles, instructions retired) so the
+      harness reports **cycles/byte and instructions/byte directly** — the metric
+      this project actually cares about — with criterion's stats/outlier
+      handling. Two crates, both a custom `Measurement` so integration is
+      identical:
+      [`criterion-linux-perf`](https://github.com/bruceg/criterion-linux-perf)
+      (dep `perf-event`, stable Rust, narrower events) vs
+      [`criterion-perf-events`](https://github.com/criterion-rs/criterion-perf-events)
+      (dep `perfcnt`, **nightly-only — but we're already pinned to nightly for
+      rust-cuda, so that's moot for us**, wider/vendor-specific event coverage,
+      and lives in the criterion-rs org). Decision gate: **criterion 0.5 compat**
+      (verify first); tiebreak toward `criterion-perf-events` for coverage since
+      nightly costs us nothing. Gate behind a Linux-only feature (won't build on
+      the arm64 Mac host; the AES-NI benches are x86_64-only anyway). Needs
+      `kernel.perf_event_paranoid` set. Note: for *deep* multi-event analysis
+      (cache, bandwidth, FP-pipe) standalone `perf stat`/`annotate` is better —
+      the harness is for tracking one stable metric per variant.
+- [ ] **Standalone profiling harness** — `examples/profile.rs` taking
+      `<variant> <log2_blocks> <iters>` that loops one kernel, for clean
+      `perf stat` / `perf annotate` / `perf record` runs with a controllable size
+      (no const edit + rebuild) and zero criterion framework noise.
+- [ ] **Debug info in the bench profile** — `[profile.bench] debug = true` so
+      `perf annotate` maps samples back to symbols/source (codegen unchanged).
+- [ ] **One clean canonical run** — collect every rung at a fixed `N` in a single
+      run for the write-up table; the numbers in `blog-post.md` are currently
+      stitched across several runs (throughput is stable, but do it properly).
 
 ## References
 
