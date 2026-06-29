@@ -76,20 +76,38 @@ impl Aes for CpuAesNiX8 {
     }
 }
 
-/// `cpu/aesni-x8` fanned across CPU cores with rayon
-/// (`encrypt_ctr_parallel::<8>`), x86_64 only. Each core runs the same 8-way
-/// interleaved kernel over an independent slice of counter blocks, so on an
-/// N-core box it stacks ~N× on top of the per-core x8 win.
+/// AES-NI x8 with the per-block byte handling kept in the SIMD domain
+/// (`encrypt_ctr_pshufb::<8>`), x86_64 only. Same interleaving as `cpu/aesni-x8`,
+/// but counters live in `__m128i`, the byte swap is one `PSHUFB`, and plaintext
+/// is XORed as `__m128i` — removing the scalar repack that pins `cpu/aesni-x8`
+/// well below the `AESENC` ceiling.
 #[cfg(target_arch = "x86_64")]
-pub struct CpuAesNiX8Parallel;
+pub struct CpuAesNiX8Pshufb;
 
 #[cfg(target_arch = "x86_64")]
-impl Aes for CpuAesNiX8Parallel {
+impl Aes for CpuAesNiX8Pshufb {
     fn name(&self) -> &str {
-        "cpu/aesni-x8-parallel"
+        "cpu/aesni-x8-pshufb"
     }
     fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
-        aes_cpu::aesni::encrypt_ctr_parallel::<8>(rk, counter0, blocks, out);
+        aes_cpu::aesni::encrypt_ctr_pshufb::<8>(rk, counter0, blocks, out);
+    }
+}
+
+/// The per-core `cpu/aesni-x8-pshufb` kernel fanned across CPU cores with rayon
+/// (`encrypt_ctr_pshufb_parallel::<8>`), x86_64 only. The two wins compose: each
+/// core runs the repack-free SIMD kernel over an independent slice of counter
+/// blocks, so an N-core box stacks ~N× on top of the per-core pshufb throughput.
+#[cfg(target_arch = "x86_64")]
+pub struct CpuAesNiX8PshufbParallel;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuAesNiX8PshufbParallel {
+    fn name(&self) -> &str {
+        "cpu/aesni-x8-pshufb-parallel"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::aesni::encrypt_ctr_pshufb_parallel::<8>(rk, counter0, blocks, out);
     }
 }
 
@@ -102,7 +120,8 @@ pub fn cpu_variants() -> Vec<Box<dyn Aes>> {
     if std::is_x86_feature_detected!("aes") {
         v.push(Box::new(CpuAesNi));
         v.push(Box::new(CpuAesNiX8));
-        v.push(Box::new(CpuAesNiX8Parallel));
+        v.push(Box::new(CpuAesNiX8Pshufb));
+        v.push(Box::new(CpuAesNiX8PshufbParallel));
     }
     v
 }
