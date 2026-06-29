@@ -27,6 +27,7 @@ name = "aes-cpu"
 version = "0.1.0"
 dependencies = [
  "aes-core",
+ "rayon",
 ]
 
 [[package]]

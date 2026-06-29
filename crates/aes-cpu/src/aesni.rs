@@ -22,10 +22,17 @@
 //! the project's "big-endian within each u32 word" byte convention, so the shared
 //! NIST/FIPS KATs pass.
 //!
+//! [`encrypt_ctr_parallel`] is the multi-core wrapper: CTR is embarrassingly
+//! parallel (block `i` only needs `counter0 + i`), so it splits the buffer into
+//! chunks, hands each chunk a pre-advanced counter, and runs the same `W`-wide
+//! kernel on every core via rayon. Per-core latency hiding (`W`) and cross-core
+//! scaling (rayon) compose — the parallel variant is the x8 kernel × N cores.
+//!
 //! No VAES here (2/4 blocks per *instruction* via AVX-512) — the dev box's Zen 2
 //! lacks it; see [`crate::vaes`].
 
 use core::arch::x86_64::*;
+use rayon::prelude::*;
 
 /// Pack 4 big-endian-within-word u32s into a 16-byte AES state. The 16 bytes land
 /// in natural order (`w[0]`'s most-significant byte first), which is exactly the
@@ -161,9 +168,53 @@ unsafe fn encrypt_ctr_impl<const W: usize>(
     }
 }
 
+/// Like [`encrypt_ctr`] but fans the `W`-interleaved work across CPU cores with
+/// rayon. CTR is embarrassingly parallel: block `i` always uses `counter0 + i`,
+/// so the chunk starting at block `start` is just an independent [`encrypt_ctr`]
+/// whose counter is pre-advanced to `counter_block(counter0, start)`. Each core
+/// then runs the exact same latency-hiding `W`-wide kernel, so the result is
+/// byte-identical to `encrypt_ctr::<W>` — only faster by ~the core count.
+///
+/// Chunks are sized to one per worker thread, rounded up to a whole number of
+/// `W`-wide groups so the main interleaved loop stays full-width in every chunk
+/// and only the final chunk can carry a `< W` remainder.
+///
+/// Panics if the CPU lacks AES-NI, or if `out.len() != blocks.len()`.
+pub fn encrypt_ctr_parallel<const W: usize>(
+    rk: &[u32],
+    counter0: [u32; 4],
+    blocks: &[[u32; 4]],
+    out: &mut [[u32; 4]],
+) {
+    assert!(
+        std::is_x86_feature_detected!("aes"),
+        "aes-cpu::aesni requires AES-NI (the `aes` CPU feature)"
+    );
+    assert_eq!(blocks.len(), out.len(), "out must be as long as blocks");
+    let n = blocks.len();
+    if n == 0 {
+        return;
+    }
+    // One chunk per worker thread, rounded up to a multiple of W so each chunk
+    // (bar the last) is a whole number of W-wide groups. `counter_block` advances
+    // the counter by the chunk's start index — see the homomorphism note: the
+    // per-chunk local index j maps to the same global counter as the serial path.
+    let threads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(threads).next_multiple_of(W);
+    out.par_chunks_mut(chunk)
+        .zip(blocks.par_chunks(chunk))
+        .enumerate()
+        .for_each(|(c, (out_c, blk_c))| {
+            let c0 = counter_block(counter0, (c * chunk) as u32);
+            // SAFETY: the `aes` feature is checked above and holds on every
+            // worker (same CPU); the chunks from `par_chunks_mut` are disjoint.
+            unsafe { encrypt_ctr_impl::<W>(rk, c0, blk_c, out_c) };
+        });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::encrypt_ctr;
+    use super::{encrypt_ctr, encrypt_ctr_parallel};
     use aes_core::{key_expansion, CTR_KAT, KAT_VECTORS};
 
     /// The shared correctness gate, run at a given interleave width: the NIST
@@ -211,6 +262,29 @@ mod tests {
             encrypt_ctr::<1>(&rk, counter0, &blocks, &mut a);
             encrypt_ctr::<8>(&rk, counter0, &blocks, &mut b);
             assert_eq!(a, b, "width 1 vs 8 disagree at n={n}");
+        }
+    }
+
+    #[test]
+    fn parallel_matches_serial() {
+        if !std::is_x86_feature_detected!("aes") {
+            eprintln!("skipping parallel_matches_serial: no AES-NI on this CPU");
+            return;
+        }
+        // The multi-core path must be byte-identical to the single-core x8 kernel.
+        // Sizes span the empty case, sub-chunk, exact W multiples, the (< W)
+        // remainder, and n large enough to split across several worker threads.
+        let rk = key_expansion(CTR_KAT.key);
+        let counter0 = CTR_KAT.counter0;
+        for n in [0usize, 1, 7, 8, 9, 16, 17, 100, 1000, 65536] {
+            let blocks: Vec<[u32; 4]> = (0..n)
+                .map(|k| [k as u32, 0xDEAD_BEEF, 0x0BAD_F00D, 0x1234_5678])
+                .collect();
+            let mut serial = vec![[0u32; 4]; n];
+            let mut par = vec![[0u32; 4]; n];
+            encrypt_ctr::<8>(&rk, counter0, &blocks, &mut serial);
+            encrypt_ctr_parallel::<8>(&rk, counter0, &blocks, &mut par);
+            assert_eq!(serial, par, "parallel vs serial x8 disagree at n={n}");
         }
     }
 }

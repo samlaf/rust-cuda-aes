@@ -9,3 +9,5 @@ edition = "2024"
 # crate (`aes-bench`) so all backends are timed side by side.
 [dependencies]
 aes-core = { path = "../aes-core" }
+# Fans the AES-NI CTR work across cores for the `cpu/aesni-x8-parallel` variant.
+rayon = "1"

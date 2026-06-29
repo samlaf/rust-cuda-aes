@@ -82,9 +82,6 @@ is the round function (`aes_core::encrypt_block`) that CTR now drives.
 Each step layers one of the paper's optimizations onto the previous, keeping the
 KAT green throughout:
 
-- [ ] **CPU multi-core** — fan `cpu/aesni-x8` across cores with `rayon`
-      (`cpu/aesni-x8-parallel`). With ~4 vCPUs this is the rest of the gap to the
-      paper's whole-chip CPU numbers.
 - [ ] **CPU VAES backend** — widen `crates/aes-cpu/src/vaes.rs` to 2/4 blocks per
       instruction (`_mm256/512_aesenc_epi128`). Needs AVX-512 + `vaes`; the dev
       box's Zen 2 EPYC has neither, so this waits for a capable CPU.
