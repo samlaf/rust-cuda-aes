@@ -111,8 +111,78 @@ impl Aes for CpuAesNiX8PshufbParallel {
     }
 }
 
+/// 256-bit VAES: 2 blocks per `VAESENC`, 8 wide registers interleaved
+/// (`encrypt_ctr_vaes256::<8>`), x86_64 + `vaes`/`avx2` only. The next rung above
+/// `cpu/aesni-x8-pshufb` — and it keeps the *same* `-x8-pshufb` machinery (8-way
+/// interleave + the `PSHUFB` SIMD-dataflow byte swap, now `_mm256_shuffle_epi8`);
+/// only the AES round widens, to 2 independent blocks per instruction. The suffix
+/// is carried so the report can't be misread as "VAES dropped pshufb."
+#[cfg(target_arch = "x86_64")]
+pub struct CpuVaes256X8Pshufb;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuVaes256X8Pshufb {
+    fn name(&self) -> &str {
+        "cpu/vaes256-x8-pshufb"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::vaes::encrypt_ctr_vaes256::<8>(rk, counter0, blocks, out);
+    }
+}
+
+/// 512-bit VAES: 4 blocks per `VAESENC`, 8 wide registers interleaved
+/// (`encrypt_ctr_vaes512::<8>`), x86_64 + `vaes`/AVX-512 only. Same `-x8-pshufb`
+/// machinery as the rest (the byte swap is `_mm512_shuffle_epi8` here); doubles
+/// the 256-bit path again on a native 512-bit datapath (Zen 5, Ice Lake+).
+#[cfg(target_arch = "x86_64")]
+pub struct CpuVaes512X8Pshufb;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuVaes512X8Pshufb {
+    fn name(&self) -> &str {
+        "cpu/vaes512-x8-pshufb"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::vaes::encrypt_ctr_vaes512::<8>(rk, counter0, blocks, out);
+    }
+}
+
+/// `cpu/vaes256-x8-pshufb` fanned across all cores with rayon
+/// (`encrypt_ctr_vaes256_parallel::<8>`), x86_64 + `vaes`/`avx2` only.
+#[cfg(target_arch = "x86_64")]
+pub struct CpuVaes256X8PshufbParallel;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuVaes256X8PshufbParallel {
+    fn name(&self) -> &str {
+        "cpu/vaes256-x8-pshufb-parallel"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::vaes::encrypt_ctr_vaes256_parallel::<8>(rk, counter0, blocks, out);
+    }
+}
+
+/// `cpu/vaes512-x8-pshufb` fanned across all cores with rayon
+/// (`encrypt_ctr_vaes512_parallel::<8>`), x86_64 + `vaes`/AVX-512 only. The top
+/// CPU rung: widest instruction × every core.
+#[cfg(target_arch = "x86_64")]
+pub struct CpuVaes512X8PshufbParallel;
+
+#[cfg(target_arch = "x86_64")]
+impl Aes for CpuVaes512X8PshufbParallel {
+    fn name(&self) -> &str {
+        "cpu/vaes512-x8-pshufb-parallel"
+    }
+    fn encrypt_ctr(&self, rk: &[u32], counter0: [u32; 4], blocks: &[[u32; 4]], out: &mut [[u32; 4]]) {
+        aes_cpu::vaes::encrypt_ctr_vaes512_parallel::<8>(rk, counter0, blocks, out);
+    }
+}
+
 /// Every CPU variant available on this target, in tutorial order. The AES-NI
-/// variants are added only on an x86_64 CPU that actually has AES-NI.
+/// variants are added only on an x86_64 CPU that has AES-NI; the VAES variants
+/// only where the CPU also reports `vaes` (+ AVX2 for 256-bit, AVX-512 for
+/// 512-bit), so they're simply absent on a Zen 2 box and present on a Zen 4+ /
+/// Ice Lake+ one — same auto-skip pattern as the `aes` guard.
 pub fn cpu_variants() -> Vec<Box<dyn Aes>> {
     #[allow(unused_mut)]
     let mut v: Vec<Box<dyn Aes>> = vec![Box::new(CpuScalar)];
@@ -122,6 +192,19 @@ pub fn cpu_variants() -> Vec<Box<dyn Aes>> {
         v.push(Box::new(CpuAesNiX8));
         v.push(Box::new(CpuAesNiX8Pshufb));
         v.push(Box::new(CpuAesNiX8PshufbParallel));
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("vaes") && std::is_x86_feature_detected!("avx2") {
+        v.push(Box::new(CpuVaes256X8Pshufb));
+        v.push(Box::new(CpuVaes256X8PshufbParallel));
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("vaes")
+        && std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512bw")
+    {
+        v.push(Box::new(CpuVaes512X8Pshufb));
+        v.push(Box::new(CpuVaes512X8PshufbParallel));
     }
     v
 }

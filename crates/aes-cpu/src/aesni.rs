@@ -70,9 +70,13 @@ unsafe fn store_words(v: __m128i) -> [u32; 4] {
 }
 
 /// Pack the 44-word schedule from [`aes_core::key_expansion`] into 11 round keys.
+///
+/// `pub(crate)` so the VAES kernels ([`crate::vaes`]) can broadcast these same
+/// `__m128i` round keys into their 256-/512-bit lanes — one byte convention,
+/// shared.
 #[inline]
 #[target_feature(enable = "aes")]
-unsafe fn round_keys(rk: &[u32]) -> [__m128i; 11] {
+pub(crate) unsafe fn round_keys(rk: &[u32]) -> [__m128i; 11] {
     unsafe {
         let mut k = [_mm_setzero_si128(); 11];
         for (r, kr) in k.iter_mut().enumerate() {
@@ -84,10 +88,10 @@ unsafe fn round_keys(rk: &[u32]) -> [__m128i; 11] {
 
 /// Encrypt one block (the cipher core / keystream generator): initial
 /// AddRoundKey, 9 full rounds, then the last round (no MixColumns). Used for the
-/// `< W` remainder of [`encrypt_ctr`].
+/// `< W` remainder of [`encrypt_ctr`] and the VAES kernels' scalar tail.
 #[inline]
 #[target_feature(enable = "aes")]
-unsafe fn encrypt_one(rk: &[__m128i; 11], block: [u32; 4]) -> [u32; 4] {
+pub(crate) unsafe fn encrypt_one(rk: &[__m128i; 11], block: [u32; 4]) -> [u32; 4] {
     unsafe {
         let mut s = _mm_xor_si128(load_words(block), rk[0]);
         for &k in &rk[1..10] {
@@ -100,9 +104,10 @@ unsafe fn encrypt_one(rk: &[__m128i; 11], block: [u32; 4]) -> [u32; 4] {
 
 /// The counter block for position `idx`: `counter0` with its low 32-bit word
 /// advanced by `idx` (NIST SP 800-38A low-word increment; matches
-/// [`aes_core::encrypt_ctr_block`]).
+/// [`aes_core::encrypt_ctr_block`]). `pub(crate)` so [`crate::vaes`] derives its
+/// per-chunk and scalar-tail counters through the same path.
 #[inline]
-fn counter_block(counter0: [u32; 4], idx: u32) -> [u32; 4] {
+pub(crate) fn counter_block(counter0: [u32; 4], idx: u32) -> [u32; 4] {
     [counter0[0], counter0[1], counter0[2], counter0[3].wrapping_add(idx)]
 }
 

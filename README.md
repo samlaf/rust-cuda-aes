@@ -13,7 +13,7 @@ level: `benches/` (all benchmarks) and `kernels/` (the GPU device code).
 | Crate | Target | Role |
 |-------|--------|------|
 | `crates/aes-core/` | portable, `#![no_std]` | Shared primitives: constant tables, key schedule, `encrypt_block` (round function) + `encrypt_ctr_block` (CTR) + the FIPS-197 and NIST F.5.1 KAT vectors. Depended on by everything; no deps of its own. |
-| `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (portable T-table CTR) and `aesni` (AES-NI hardware AES, x86_64); `vaes` (wider VAES, needs AVX-512) is still a TODO. |
+| `crates/aes-cpu/` | host (std) | CPU backends: `scalar` (portable T-table CTR), `aesni` (AES-NI hardware AES + interleaved/`PSHUFB`/multi-core kernels, x86_64), and `vaes` (wider VAES — 2 blocks/instr via 256-bit, 4 blocks/instr via 512-bit, + multi-core, x86_64). VAES verified on Azure Fasv7 (Zen 5 EPYC 9V45): all KATs pass, byte-identical to the AES-NI reference. |
 | `crates/aes-gpu/` | host (std) | GPU backend **library**: builds the PTX (`build.rs`), embeds it, and exposes `AesGpu::encrypt_ctr` to upload inputs and launch the CTR kernel. Round-trip tests against FIPS-197 + NIST F.5.1. |
 | `kernels/` | `nvptx64` (GPU) | The GPU kernel (`aes128_ctr`), compiled to PTX. Depends on `aes-core`. Standalone (its own workspace, not a member) so `CudaBuilder` builds it in isolation. |
 | `benches/` | host (std) | `aes-bench`: an `Aes`-variant registry (`variants.rs`) plus criterion benches that iterate it — `throughput.rs` (every backend in one comparable group, GPU variants behind the `gpu` feature) and `latency.rs` (GPU single-block; `gpu`-only). |
@@ -82,9 +82,6 @@ is the round function (`aes_core::encrypt_block`) that CTR now drives.
 Each step layers one of the paper's optimizations onto the previous, keeping the
 KAT green throughout:
 
-- [ ] **CPU VAES backend** — widen `crates/aes-cpu/src/vaes.rs` to 2/4 blocks per
-      instruction (`_mm256/512_aesenc_epi128`). Needs AVX-512 + `vaes`; the dev
-      box's Zen 2 EPYC has neither, so this waits for a capable CPU.
 - [ ] **GPU `R > 1` sweep** — the `aes128_ctr` kernel already takes
       `blocks_per_thread` (`R`) at runtime; register `gpu/…-range-{4,8,16}`
       variants (one line each) for the paper's arithmetic-intensity win, each
@@ -143,8 +140,9 @@ roadmap above):
 - [ ] **Debug info in the bench profile** — `[profile.bench] debug = true` so
       `perf annotate` maps samples back to symbols/source (codegen unchanged).
 - [ ] **One clean canonical run** — collect every rung at a fixed `N` in a single
-      run for the write-up table; the numbers in `blog-post.md` are currently
-      stitched across several runs (throughput is stable, but do it properly).
+      run for the write-up tables in `blog-posts/`. The single-core ladder (post 1)
+      now comes from one Zen 5 run; the multi-core + memory-wall numbers (post 2)
+      still need the block-size sweep to be collected properly.
 
 ## References
 
