@@ -10,15 +10,26 @@ autobenches = false
 [lib]
 path = "lib.rs"
 
+[features]
 # The GPU bench is behind the `gpu` feature so the CPU bench stays buildable
 # without CUDA: `aes-gpu` (and its PTX build.rs) is only pulled in when enabled.
-[features]
 gpu = ["dep:aes-gpu"]
+# The `perf` feature swaps criterion's wall-clock timer for a Linux perf-counter
+# `Measurement` (cycles/byte, instructions/byte); Linux-only (see perf.rs), so it
+# stays off by default and `perf-event` isn't pulled in on the arm64 Mac host.
+perf = ["dep:perf-event"]
+# `aperf` is the fallback backend for hosts with no exposed PMU (e.g. the Azure
+# Zen 5 slice): it counts cycles via the APERF MSR instead (see aperf.rs).
+aperf = ["dep:libc"]
 
 [dependencies]
 aes-core = { path = "../crates/aes-core" }
 aes-cpu = { path = "../crates/aes-cpu" }
 aes-gpu = { path = "../crates/aes-gpu", optional = true }
+# Normal (not dev) dep so the perf module — compiled into the throughput bench —
+# can see it; optional + gated by feature so they're only built on the Linux box.
+perf-event = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

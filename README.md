@@ -43,8 +43,33 @@ against the shared FIPS-197 known answers (host-only, **no GPU/CUDA required**):
 cargo test  -p aes-core
 cargo test  -p aes-cpu
 cargo test  -p aes-bench              # KAT over every CPU variant in the registry
-cargo bench -p aes-bench --bench throughput
+cargo bench -p aes-bench --bench throughput          # wall-clock: time + GiB/s
 ```
+
+Cycles/byte instead of wall-clock — swap criterion's timer for a hardware cycle
+counter (Linux only; reports **cycles/byte** directly, no clock assumption). Two
+backends, chosen by whether the host exposes a PMU (see the
+[methods note](blog-posts/0-measuring-cycles-per-byte.md)):
+
+```bash
+# perf_event PMU — where a PMU is exposed (bare metal, the Zen 2 / T4 node).
+# cycles/byte, or AES_PERF_EVENT=instructions for instructions/byte:
+cargo bench -p aes-bench --features perf --bench throughput
+AES_PERF_EVENT=instructions cargo bench -p aes-bench --features perf --bench throughput
+
+# APERF MSR — fallback for hosts with no exposed PMU (e.g. the Azure Zen 5 slice).
+# Reads actual core cycles via /dev/cpu/N/msr, so it needs the msr module + root.
+# Build as your user (to resolve the toolchain), then run the built binary as root:
+sudo modprobe msr
+BIN=$(cargo bench -p aes-bench --features aperf --bench throughput --no-run \
+        --message-format=json 2>/dev/null \
+      | jq -r 'select(.executable and .target.name=="throughput") | .executable' | tail -1)
+sudo taskset -c 0 "$BIN" --bench          # pins to AES_APERF_CPU (default 0)
+```
+
+Both counter backends report **cycles/byte** and drop the multi-threaded
+`*-parallel` variants (a per-thread counter can't see the rayon workers). `perf`
+and `aperf` are mutually exclusive; if both are set, `aperf` wins.
 
 GPU round-trip test + benchmarks — builds the kernel and runs it on the device,
 adding the GPU variants to the same `aes128-ctr` comparison (needs an NVIDIA GPU
@@ -86,40 +111,15 @@ stays KAT-green throughout.
 
 ### Post 1 — single core, the silicon ceiling
 
-Prose is essentially done (`blog-posts/1-single-core-aes.md`). Its cycles/byte are
-currently *derived* (`clock ÷ throughput`, assuming the verified-constant
-~4.17 GHz); these upgrades make the harness report the metric **directly** and back
-the single-core micro-arch claims with data.
+Prose done (`blog-posts/1-single-core-aes.md`), with cycles/byte now
+APERF-**measured** (not derived; see the methods note). What's left is one
+confirmatory sweep:
 
-- [ ] **Hardware perf counters in the harness** — swap criterion's wall-clock
-      `Measurement` for a perf-counter one so the report shows **cycles/byte and
-      instructions/byte directly**, with criterion's stats/outlier handling. The
-      `cycles` event counts *actual elapsed core cycles*, so this **drops the
-      constant-clock assumption** (use `CPU_CYCLES`, not `REF_CPU_CYCLES`). This is
-      the metric the project actually cares about.
-    - *Crate choice.* [`criterion-linux-perf`](https://github.com/bruceg/criterion-linux-perf)
-      (dep `perf-event`, stable Rust) vs
-      [`criterion-perf-events`](https://github.com/criterion-rs/criterion-perf-events)
-      (dep `perfcnt`, nightly, wider events), or a small in-repo `Measurement`
-      directly on `perf-event`. **AMD note:** the generic `cycles`/`instructions`
-      events map per-vendor in the kernel and read identically on Zen; `perfcnt`'s
-      "wider coverage" edge is *Intel-centric*, so on Zen 5 the earlier tiebreak
-      **flips toward `perf-event`**. Rolling our own also sidesteps the
-      criterion-version coupling of both wrappers and gives control over the
-      thread-scoping issue below — leaning that way.
-    - *Gates.* Verify **criterion 0.5 compat** for any wrapper; Linux-only feature
-      (won't build on the arm64 Mac; AES-NI benches are x86_64 anyway);
-      `kernel.perf_event_paranoid` set; the VM must expose a vPMU (**confirmed on
-      the Zen 2 / T4 node — verify on the Zen 5 slice**).
-    - *Thread-scoping trap.* A counter is per-thread by default, so it counts only
-      the bench thread — correct for the single-core rungs, **wrong for the
-      `*-parallel` variants** (post 2) unless counted inherit-on-fork / per-CPU or
-      simply suppressed there.
 - [ ] **Interleave-width (`W`) sweep** — `W` is a compile-time const generic, so
       this is *not* a criterion runtime input: add registry variants
       (`cpu/aesni-x{1,2,4,8,16}-pshufb`) or a dedicated tuning bench to confirm the
       Little's-law optimum (≈4 on Skylake, ≈8 on Zen) — the rung-3/4 claim. Reads
-      straight off the new cyc/byte metric once the perf harness lands.
+      straight off the cyc/byte metric now that the counter harness is in place.
 
 ### Post 2 — multi core, the memory wall
 
@@ -155,8 +155,18 @@ Each step layers one of the paper's optimizations onto the previous:
       all 32 shared-memory banks (`t0S[256][32]`) so each warp lane reads its own
       bank. This is the paper's core contribution.
 
-### Shared harness / infra (posts 1–2)
+### Post 0 (methods) + shared harness / infra
 
+- [ ] **Methods note** (`blog-posts/0-measuring-cycles-per-byte.md`, stub written) —
+      the "how we measure cyc/byte, and what we can't" reference the series links to:
+      cyc/byte vs GiB/s, the ceiling model, PMU vs APERF, the no-vPMU-on-Azure story,
+      the criterion custom `Measurement`, and the clock-isn't-constant catch. Pending
+      data: the multi-machine PMU runs below.
+- [ ] **Multi-machine PMU runs** (feeds the methods note) — `--features perf` on the
+      **Zen 2 / T4 node** (has a PMU; cheap) for real `perf_event` cyc/byte **+
+      instructions/byte**, then an **Azure HB-series** box (PMU + AMD uProf) for the
+      *deep* counters: per-port µops to **prove rung 4's port saturation**, plus IPC.
+      APERF (Fasv7) only gives cycles; these give everything APERF can't.
 - [ ] **Standalone profiling harness** — `examples/profile.rs` taking
       `<variant> <log2_blocks> <iters>` that loops one kernel, for clean
       `perf stat` / `perf annotate` / `perf record` runs with a controllable size
@@ -166,9 +176,9 @@ Each step layers one of the paper's optimizations onto the previous:
 - [ ] **Debug info in the bench profile** — `[profile.bench] debug = true` so
       `perf annotate` maps samples back to symbols/source (codegen unchanged).
 - [ ] **One clean canonical run** — collect every rung at a fixed `N` in a single
-      run for the write-up tables in `blog-posts/`. Post 1's single-core ladder is
-      one Zen 5 run already (re-collect once the perf harness makes cyc/byte
-      measured); post 2's multi-core + memory-wall numbers still need the
+      run for the write-up tables in `blog-posts/`. Post 1's single-core ladder now
+      has APERF-**measured** cyc/byte (the `--features aperf` run) alongside the
+      wall-clock GiB/s; post 2's multi-core + memory-wall numbers still need the
       block-size sweep to be collected properly.
 
 ## References

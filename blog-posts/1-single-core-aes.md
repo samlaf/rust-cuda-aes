@@ -6,7 +6,7 @@
 > AES-128 CUDA implementation ([eprint 2021/646]) to Rust + [rust-cuda], and before
 > we can honestly say "the GPU is fast" we need honest CPU baselines to measure it
 > against. This post builds those baselines on **one core** — from a portable
-> software implementation to the literal silicon ceiling, a ~104× climb in six
+> software implementation to the silicon ceiling, a ~104× climb in six
 > steps, each teaching one microarchitectural lesson. The next post spends the
 > other cores and runs into the memory wall; the one after that is the GPU.
 
@@ -52,9 +52,13 @@ kernel agrees byte-for-byte with every other. *Optimization without a correctnes
 gate is just fast wrongness.*
 
 **The machine.** An Azure `Standard_F8as_v7`: **AMD EPYC 9V45** ("Turin", Zen 5),
-**8 physical cores (no SMT)**, single NUMA node, sustained **~4.17 GHz** all-core
-under load (verified via `/proc/cpuinfo` during the run, so the clock isn't a
-confound). The default workload is `N_BLOCKS = 1 << 16` = 1 MiB.
+**8 physical cores (no SMT)**, single NUMA node. The clock is *not* fixed: a single
+busy core boosts to ~4.45 GHz, and even drifts ~2% lower on the AVX-512 rungs
+(they draw more power). We don't have to pin that number down, though — **we
+measure cycles/byte directly, by counting actual core cycles**, so the clock
+divides itself out. (This box exposes no PMU to `perf`, so we read cycles via the
+APERF MSR; see the [methods note](0-measuring-cycles-per-byte.md) for how and why.)
+The default workload is `N_BLOCKS = 1 << 16` = 1 MiB.
 
 One deliberate choice: **1 MiB is cache-resident.** Input + output (2 MiB) lives in
 L3, so a single core is never waiting on DRAM. This post is about *per-core
@@ -93,7 +97,7 @@ s = _mm_aesenclast_si128(s, keys[10]);
 contest. But there's a catch that sets up the next rung: those ten `AESENC`s form a
 *single dependency chain* — each waits on the previous one's result. `AESENC` has a
 ~4-cycle latency, so the core is bound by *latency*, and the two AES units sit
-mostly idle. At **1.83 cyc/byte this is only ~17% of the AES-NI throughput
+mostly idle. At **1.96 cyc/byte this is only ~16% of the AES-NI throughput
 ceiling** (more on that ceiling below).
 
 ### 3. `cpu/aesni-x8` — interleave 8 blocks to hide the latency
@@ -116,7 +120,7 @@ that fits in the 16 XMM registers. (It's why OpenSSL and BoringSSL also interlea
 eight.)
 
 The model says this should be a big jump. It isn't: **3.60 GiB/s, only 1.70× over
-the single-block version — still just 29% of the ceiling.** That anomaly is the
+the single-block version — still just 27% of the ceiling.** That anomaly is the
 lead-in to the real story.
 
 ### 4. `cpu/aesni-x8-pshufb` — get out of the scalar lane
@@ -156,7 +160,7 @@ let ks = _mm_shuffle_epi8(*sj, bswap);
 _mm_storeu_si128(out.as_mut_ptr().add(i + j) as *mut __m128i, _mm_xor_si128(pt, ks));
 ```
 
-**12.17 GiB/s — 3.4× over `x8`, landing at 0.319 cyc/byte ≈ 98% of the AES-NI
+**12.17 GiB/s — 3.4× over `x8`, landing at 0.341 cyc/byte ≈ 92% of the AES-NI
 ceiling.** The AES units are *finally* the bottleneck. The repack was partly an
 artifact of our own byte convention, but the lesson generalizes: **the data
 marshalling around a SIMD kernel is the cost beginners under-weight, because it
@@ -181,7 +185,7 @@ for r in 1..10 {
 }
 ```
 
-**23.96 GiB/s — 1.97× over the 128-bit path, 0.162 cyc/byte ≈ 96% of the
+**23.96 GiB/s — 1.97× over the 128-bit path, 0.173 cyc/byte ≈ 90% of the
 (now-halved) 256-bit ceiling.** Doubling the instruction width doubled throughput.
 
 ### 6. `cpu/vaes512-x8-pshufb` — four blocks per instruction
@@ -193,8 +197,8 @@ in 512-bit registers (`_mm512_shuffle_epi8` for the swap):
 *sj = _mm512_aesenc_epi128(*sj, keys4[r]);   // each __m512i = 4 blocks
 ```
 
-**49.08 GiB/s — 2.05× over the 256-bit path, 4.0× over 128-bit, and 0.079 cyc/byte
-≈ 99% of the 512-bit ceiling.** This is the per-core apex.
+**49.08 GiB/s — 2.05× over the 256-bit path, 4.0× over 128-bit, and 0.0841 cyc/byte
+≈ 93% of the 512-bit ceiling.** This is the per-core apex.
 
 The clean *doubling at every width* — 12.2 → 24.0 → 49.1 GiB/s — is the headline.
 It only happens if a 512-bit `VAESENC` retires *as fast* as a 128-bit one while
@@ -205,8 +209,11 @@ there would have been a flat line. Zen 5 widened the datapath to a true 512 bits
 
 ## How good is this, really? Cycles/byte
 
-GiB/s hides the clock; **cycles/byte** is the fair, clock-normalized metric. The
-AES-NI throughput ceiling is set by the AES execution units:
+GiB/s hides the clock; **cycles/byte** is the fair, clock-normalized metric — and
+we measure it *directly*, counting actual core cycles (via the APERF MSR, since this
+VM exposes no PMU; [see the methods note](0-measuring-cycles-per-byte.md)), so it
+isn't even inferred from a clock. The AES-NI throughput ceiling is set by the AES
+execution units:
 
 ```
 ceiling = 10 rounds × 0.5 (reciprocal throughput) ÷ bytes-per-instruction
@@ -216,12 +223,12 @@ For 128-bit (16 B/instr) that's **0.3125 cyc/byte**; VAES halves it at each widt
 
 | rung | throughput | cyc/byte | % of width's ceiling |
 |---|---|---|---|
-| `cpu/scalar` | 0.474 GiB/s | 8.19 | — |
-| `cpu/aesni` (x1) | 2.12 GiB/s | 1.830 | 17% |
-| `cpu/aesni-x8` | 3.60 GiB/s | 1.078 | 29% |
-| `cpu/aesni-x8-pshufb` (128-bit) | 12.17 GiB/s | 0.319 | **98%** |
-| `cpu/vaes256-x8-pshufb` (256-bit) | 23.96 GiB/s | 0.162 | **96%** |
-| `cpu/vaes512-x8-pshufb` (512-bit) | 49.08 GiB/s | 0.079 | **99%** |
+| `cpu/scalar` | 0.474 GiB/s | 8.90 | — |
+| `cpu/aesni` (x1) | 2.12 GiB/s | 1.96 | 16% |
+| `cpu/aesni-x8` | 3.60 GiB/s | 1.15 | 27% |
+| `cpu/aesni-x8-pshufb` (128-bit) | 12.17 GiB/s | 0.341 | **92%** |
+| `cpu/vaes256-x8-pshufb` (256-bit) | 23.96 GiB/s | 0.173 | **90%** |
+| `cpu/vaes512-x8-pshufb` (512-bit) | 49.08 GiB/s | 0.0841 | **93%** |
 
 *(AES-NI rungs vs the 0.3125 128-bit ceiling; VAES vs the width-adjusted 0.15625 /
 0.078125.)*
@@ -237,17 +244,17 @@ exactly our interleave width.)
 
 **A cross-generation aside.** On an older Zen 2, the `pshufb` rung only reached
 ~70% of the 128-bit ceiling — Zen 5's wider ports and better store-forwarding take
-the same code to 98%. On a modern core, once you remove the repack you are
-genuinely *at* the silicon limit; there's no 30% of slack left to chase.
+the same code to ~92%. On a modern core, once you remove the repack you're within a
+hair of the silicon limit; there's no big slack left to chase.
 
 ## Comparison with the paper
 
 The Tezcan paper is a GPU paper, but it reports CPU AES-NI references and states
 its CPU kernel runs at **1.30 cyc/byte ≈ 24% of the AES-NI ceiling**, "unchanged
 across six CPU generations" — i.e. an under-interleaved reference. At the *same*
-128-bit instruction width, our `pshufb` rung is 0.319 cyc/byte (98%): **~4× more
+128-bit instruction width, our `pshufb` rung is 0.341 cyc/byte (92%): **~3.8× more
 efficient per core**, before VAES even enters the picture. With VAES-512 it's
-0.079.
+0.084.
 
 Cycles/byte is the fair comparison here — the clock is divided out and both sides
 are compute-bound and cache-resident. *Aggregate* Gbps is a different story,
@@ -259,7 +266,7 @@ whole point.
 
 The single-core climb, in one breath: software T-tables → hardware AES → interleave
 to hide latency → **kill the scalar repack** (the real win) → widen the instruction
-with VAES, twice → the silicon ceiling. Net **~104×**, ending at **99% of the
+with VAES, twice → the silicon ceiling. Net **~104×**, ending at **~93% of the
 per-core hardware maximum**.
 
 The transferable lesson is rung 4: the named "real work" (`AESENC`) is cheap and
