@@ -77,10 +77,68 @@ for the last round, all in plain global memory. The S-box, T-tables and `RCON`
 are generated at compile time via `const fn` from GF(2⁸) first principles. This
 is the round function (`aes_core::encrypt_block`) that CTR now drives.
 
-## TODO / next steps
+## TODO / roadmap
 
-Each step layers one of the paper's optimizations onto the previous, keeping the
-KAT green throughout:
+Organized by the series post each item serves. Two kinds of work are interleaved:
+**optimization rungs** (a new kept variant in `benches/variants.rs` — the story a
+post tells) and **harness/measurement** upgrades (orthogonal tooling). Every rung
+stays KAT-green throughout.
+
+### Post 1 — single core, the silicon ceiling
+
+Prose is essentially done (`blog-posts/1-single-core-aes.md`). Its cycles/byte are
+currently *derived* (`clock ÷ throughput`, assuming the verified-constant
+~4.17 GHz); these upgrades make the harness report the metric **directly** and back
+the single-core micro-arch claims with data.
+
+- [ ] **Hardware perf counters in the harness** — swap criterion's wall-clock
+      `Measurement` for a perf-counter one so the report shows **cycles/byte and
+      instructions/byte directly**, with criterion's stats/outlier handling. The
+      `cycles` event counts *actual elapsed core cycles*, so this **drops the
+      constant-clock assumption** (use `CPU_CYCLES`, not `REF_CPU_CYCLES`). This is
+      the metric the project actually cares about.
+    - *Crate choice.* [`criterion-linux-perf`](https://github.com/bruceg/criterion-linux-perf)
+      (dep `perf-event`, stable Rust) vs
+      [`criterion-perf-events`](https://github.com/criterion-rs/criterion-perf-events)
+      (dep `perfcnt`, nightly, wider events), or a small in-repo `Measurement`
+      directly on `perf-event`. **AMD note:** the generic `cycles`/`instructions`
+      events map per-vendor in the kernel and read identically on Zen; `perfcnt`'s
+      "wider coverage" edge is *Intel-centric*, so on Zen 5 the earlier tiebreak
+      **flips toward `perf-event`**. Rolling our own also sidesteps the
+      criterion-version coupling of both wrappers and gives control over the
+      thread-scoping issue below — leaning that way.
+    - *Gates.* Verify **criterion 0.5 compat** for any wrapper; Linux-only feature
+      (won't build on the arm64 Mac; AES-NI benches are x86_64 anyway);
+      `kernel.perf_event_paranoid` set; the VM must expose a vPMU (**confirmed on
+      the Zen 2 / T4 node — verify on the Zen 5 slice**).
+    - *Thread-scoping trap.* A counter is per-thread by default, so it counts only
+      the bench thread — correct for the single-core rungs, **wrong for the
+      `*-parallel` variants** (post 2) unless counted inherit-on-fork / per-CPU or
+      simply suppressed there.
+- [ ] **Interleave-width (`W`) sweep** — `W` is a compile-time const generic, so
+      this is *not* a criterion runtime input: add registry variants
+      (`cpu/aesni-x{1,2,4,8,16}-pshufb`) or a dedicated tuning bench to confirm the
+      Little's-law optimum (≈4 on Skylake, ≈8 on Zen) — the rung-3/4 claim. Reads
+      straight off the new cyc/byte metric once the perf harness lands.
+
+### Post 2 — multi core, the memory wall
+
+- [ ] **Block-size sweep (criterion inputs)** — `throughput.rs` benches a single
+      fixed `N_BLOCKS` (`1<<16`); seeing the cache→DRAM *memory wall* currently
+      means editing the const and rebuilding. Switch to
+      [`bench_with_input`](https://bheisler.github.io/criterion.rs/book/user_guide/benchmarking_with_inputs.html)
+      over a range of sizes (e.g. `1<<10 … 1<<22`) with a per-input
+      `Throughput::Bytes`, so the report charts throughput vs working-set size
+      and the wall shows up directly. (Watch the combinatorics: variants × sizes
+      × ~5s each.)
+- [ ] **Memory-wall rungs + bandwidth baseline** — the non-temporal-store and
+      keystream-only CPU variants (each raises arithmetic intensity), plus a clean
+      STREAM `Copy`/`Triad` on the Zen 5 slice for the quotable DRAM number.
+      Detailed in `blog-posts/2-multi-core-aes.md`.
+
+### Post 3 — GPU
+
+Each step layers one of the paper's optimizations onto the previous:
 
 - [ ] **GPU `R > 1` sweep** — the `aes128_ctr` kernel already takes
       `blocks_per_thread` (`R`) at runtime; register `gpu/…-range-{4,8,16}`
@@ -97,52 +155,21 @@ KAT green throughout:
       all 32 shared-memory banks (`t0S[256][32]`) so each warp lane reads its own
       bank. This is the paper's core contribution.
 
-## TODO: Benchmarks
+### Shared harness / infra (posts 1–2)
 
-Improvements to the measurement harness itself (orthogonal to the optimization
-roadmap above):
-
-- [ ] **Block-size sweep (criterion inputs)** — `throughput.rs` benches a single
-      fixed `N_BLOCKS` (`1<<16`); seeing the cache→DRAM *memory wall* currently
-      means editing the const and rebuilding. Switch to
-      [`bench_with_input`](https://bheisler.github.io/criterion.rs/book/user_guide/benchmarking_with_inputs.html)
-      over a range of sizes (e.g. `1<<10 … 1<<22`) with a per-input
-      `Throughput::Bytes`, so the report charts throughput vs working-set size
-      and the wall shows up directly. (Watch the combinatorics: variants × sizes
-      × ~5s each.)
-- [ ] **Interleave-width (`W`) sweep** — `W` is a compile-time const generic, so
-      this is *not* a criterion runtime input: add registry variants
-      (`cpu/aesni-x{1,2,4,8,16}-pshufb`) or a dedicated tuning bench to find the
-      per-microarch optimum and demonstrate the "W is a knob" point (≈4 on
-      Skylake, ≈8 on Zen).
-- [ ] **Hardware perf counters in the harness** — swap criterion's wall-clock
-      measurement for a perf-counter one (cycles, instructions retired) so the
-      harness reports **cycles/byte and instructions/byte directly** — the metric
-      this project actually cares about — with criterion's stats/outlier
-      handling. Two crates, both a custom `Measurement` so integration is
-      identical:
-      [`criterion-linux-perf`](https://github.com/bruceg/criterion-linux-perf)
-      (dep `perf-event`, stable Rust, narrower events) vs
-      [`criterion-perf-events`](https://github.com/criterion-rs/criterion-perf-events)
-      (dep `perfcnt`, **nightly-only — but we're already pinned to nightly for
-      rust-cuda, so that's moot for us**, wider/vendor-specific event coverage,
-      and lives in the criterion-rs org). Decision gate: **criterion 0.5 compat**
-      (verify first); tiebreak toward `criterion-perf-events` for coverage since
-      nightly costs us nothing. Gate behind a Linux-only feature (won't build on
-      the arm64 Mac host; the AES-NI benches are x86_64-only anyway). Needs
-      `kernel.perf_event_paranoid` set. Note: for *deep* multi-event analysis
-      (cache, bandwidth, FP-pipe) standalone `perf stat`/`annotate` is better —
-      the harness is for tracking one stable metric per variant.
 - [ ] **Standalone profiling harness** — `examples/profile.rs` taking
       `<variant> <log2_blocks> <iters>` that loops one kernel, for clean
       `perf stat` / `perf annotate` / `perf record` runs with a controllable size
-      (no const edit + rebuild) and zero criterion framework noise.
+      (no const edit + rebuild) and zero criterion framework noise. Complements the
+      in-criterion counter harness: `perf annotate` here is what *shows* rung-4's
+      repack port pressure (post 1); `perf stat` feeds post 2's bandwidth analysis.
 - [ ] **Debug info in the bench profile** — `[profile.bench] debug = true` so
       `perf annotate` maps samples back to symbols/source (codegen unchanged).
 - [ ] **One clean canonical run** — collect every rung at a fixed `N` in a single
-      run for the write-up tables in `blog-posts/`. The single-core ladder (post 1)
-      now comes from one Zen 5 run; the multi-core + memory-wall numbers (post 2)
-      still need the block-size sweep to be collected properly.
+      run for the write-up tables in `blog-posts/`. Post 1's single-core ladder is
+      one Zen 5 run already (re-collect once the perf harness makes cyc/byte
+      measured); post 2's multi-core + memory-wall numbers still need the
+      block-size sweep to be collected properly.
 
 ## References
 
